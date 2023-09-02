@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
-/// The hostname of the devices we are searching for.
-/// Every Chromecast will respond to the service name in this example.
 const CMC_SERVICE: &'static str = "_netaudio-cmc._udp.local.";
 const DBC_SERVICE: &'static str = "_netaudio-dbc._udp.local.";
 const ARC_SERVICE: &'static str = "_netaudio-arc._udp.local.";
