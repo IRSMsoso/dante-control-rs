@@ -1,11 +1,11 @@
 [package]
 name = "dante-control-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Cameron VanderTuig"]
-description = "A Dante discovery and control command line tool utilizing dante-control-rs"
-repository = "https://github.com/IRSMsoso/dante-cli"
-homepage = "https://github.com/IRSMsoso/dante-cli"
+description = "Dante discovery and control as a rust library"
+repository = "https://github.com/IRSMsoso/dante-control-rs"
+homepage = "https://github.com/IRSMsoso/dante-control-rs"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["dante", "audio"]
