@@ -2,7 +2,7 @@ use log::{debug, error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
@@ -37,9 +37,9 @@ struct DBCInfo {
 struct CMCInfo {
     addresses: HashSet<Ipv4Addr>,
     port: u16,
-    id: Option<String>,
-    manufacturer: Option<String>,
-    model: Option<String>,
+    id: String,
+    manufacturer: String,
+    model: String,
 }
 
 #[derive(Clone)]
@@ -141,14 +141,6 @@ impl DanteDeviceList {
     fn try_add_device(&mut self, new_device_name: &str) {
         // Explicitly throw away error. If we already had one, Ok. If we make one, also Ok.
         let _ = self.add_device(new_device_name);
-    }
-
-    /// Removes a device.
-    fn remove_device(&mut self, device_name: &str) -> Result<(), DeviceNotPresent> {
-        match self.devices.remove(device_name) {
-            None => Err(DeviceNotPresent {}),
-            Some(_) => Ok(()),
-        }
     }
 
     /// Updates the dbc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
@@ -306,7 +298,7 @@ fn cutoff_address<'a>(hostname: &'a str, address: Option<&'a str>) -> &'a str {
 }
 
 pub struct DanteDeviceManager {
-    devices: Arc<Mutex<DanteDeviceList>>,
+    device_list: Arc<Mutex<DanteDeviceList>>,
     running: Arc<Mutex<bool>>,
 }
 
@@ -319,19 +311,19 @@ impl DanteDeviceManager {
         // Spawn threads equal to the number of different addresses we are discovering on.
         let mdns = ServiceDaemon::new().expect("Failed to create mdns service daemon!");
 
-        // Discovery for CMC
-        let receiver = mdns
+        // Discovery for DBC
+        let dbc_receiver = mdns
             .browse(DBC_SERVICE)
             .unwrap_or_else(|_| panic!("Failed to browse for {}", DBC_SERVICE));
 
         // Fresh Arcs to move into thread.
-        let device_list_dbc = self.devices.clone();
+        let device_list_dbc = self.device_list.clone();
         let running_dbc = self.running.clone();
 
         let dbc_thread = std::thread::spawn(move || {
             debug!("Starting discovery thread");
             while *running_dbc.lock().unwrap() {
-                while let Ok(event) = receiver.try_recv() {
+                while let Ok(event) = dbc_receiver.try_recv() {
                     match event {
                         ServiceEvent::SearchStarted(service_type) => {
                             debug!("DBC Search Started: {}", &service_type);
@@ -376,6 +368,147 @@ impl DanteDeviceManager {
             }
         });
 
+        // Discovery for CMC
+        let cmc_receiver = mdns
+            .browse(CMC_SERVICE)
+            .unwrap_or_else(|_| panic!("Failed to browse for {}", CMC_SERVICE));
+
+        // Fresh Arcs to move into thread.
+        let device_list_cmc = self.device_list.clone();
+        let running_cmc = self.running.clone();
+
+        let cmc_thread = std::thread::spawn(move || {
+            debug!("Starting discovery thread");
+            while *running_cmc.lock().unwrap() {
+                while let Ok(event) = cmc_receiver.try_recv() {
+                    match event {
+                        ServiceEvent::SearchStarted(service_type) => {
+                            debug!("CMC Search Started: {}", &service_type);
+                        }
+                        ServiceEvent::ServiceFound(service_type, fullname) => {
+                            debug!("CMC Search Found: {}, {}", &service_type, &fullname);
+                            let device_name = cutoff_address(&fullname, Some(CMC_SERVICE));
+
+                            let mut device_list_lock = device_list_cmc
+                                .lock()
+                                .expect("Cannot get mutex lock of DanteDevices");
+
+                            device_list_lock.connect_cmc(device_name);
+                        }
+                        ServiceEvent::ServiceResolved(service_info) => {
+                            info!("CMC Service Resolved: {:?}", &service_info);
+                            let device_name =
+                                cutoff_address(service_info.get_fullname(), Some(CMC_SERVICE));
+                            let mut device_list_lock = device_list_cmc
+                                .lock()
+                                .expect("Cannot get mutex lock of DanteDevices");
+                            device_list_lock.update_cmc(
+                                device_name,
+                                CMCInfo {
+                                    addresses: service_info.get_addresses().to_owned(),
+                                    port: service_info.get_port().to_owned(),
+                                    id: service_info
+                                        .get_property("id")
+                                        .expect(
+                                            "Could not retrieve \"id\" property from cmc service",
+                                        )
+                                        .val_str()
+                                        .to_owned(),
+                                    manufacturer: match service_info.get_property("mf") {
+                                        Some(mf_property) => mf_property.val_str().to_owned(),
+                                        None => "N/A".to_string(),
+                                    },
+                                    model: match service_info.get_property("model") {
+                                        Some(model_property) => model_property.val_str().to_owned(),
+                                        None => "N/A".to_string(),
+                                    },
+                                },
+                            );
+                        }
+                        ServiceEvent::ServiceRemoved(service_type, fullname) => {
+                            info!("CMC Service Removed: a:{}, b:{}", &service_type, &fullname);
+                            let mut device_list_lock = device_list_cmc.lock().unwrap();
+                            device_list_lock
+                                .disconnect_cmc(cutoff_address(&fullname, Some(CMC_SERVICE)));
+                        }
+                        ServiceEvent::SearchStopped(service_type) => {
+                            error!("CMC Search Stopped: {}", &service_type);
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(100));
+            }
+        });
+
+        // Discovery for ARC
+        let arc_receiver = mdns
+            .browse(ARC_SERVICE)
+            .unwrap_or_else(|_| panic!("Failed to browse for {}", ARC_SERVICE));
+
+        // Fresh Arcs to move into thread.
+        let device_list_arc = self.device_list.clone();
+        let running_arc = self.running.clone();
+
+        let arc_thread = std::thread::spawn(move || {
+            debug!("Starting discovery thread");
+            while *running_arc.lock().unwrap() {
+                while let Ok(event) = arc_receiver.try_recv() {
+                    match event {
+                        ServiceEvent::SearchStarted(service_type) => {
+                            debug!("ARC Search Started: {}", &service_type);
+                        }
+                        ServiceEvent::ServiceFound(service_type, fullname) => {
+                            debug!("ARC Search Found: {}, {}", &service_type, &fullname);
+                            let device_name = cutoff_address(&fullname, Some(ARC_SERVICE));
+
+                            let mut device_list_lock = device_list_arc
+                                .lock()
+                                .expect("Cannot get mutex lock of DanteDevices");
+
+                            device_list_lock.connect_arc(device_name);
+                        }
+                        ServiceEvent::ServiceResolved(service_info) => {
+                            info!("ARC Service Resolved: {:?}", &service_info);
+                            let device_name =
+                                cutoff_address(service_info.get_fullname(), Some(ARC_SERVICE));
+                            let mut device_list_lock = device_list_arc
+                                .lock()
+                                .expect("Cannot get mutex lock of DanteDevices");
+                            device_list_lock.update_arc(
+                                device_name,
+                                ARCInfo {
+                                    addresses: service_info.get_addresses().to_owned(),
+                                    port: service_info.get_port().to_owned(),
+                                    router_vers: match service_info.get_property("router_vers") {
+                                        Some(router_vers_property) => {
+                                            router_vers_property.val_str().to_owned()
+                                        }
+                                        None => "N/A".to_string(),
+                                    },
+                                    router_info: match service_info.get_property("router_info") {
+                                        Some(router_info_property) => {
+                                            router_info_property.val_str().to_owned()
+                                        }
+                                        None => "N/A".to_string(),
+                                    },
+                                },
+                            );
+                        }
+                        ServiceEvent::ServiceRemoved(service_type, fullname) => {
+                            info!("ARC Service Removed: a:{}, b:{}", &service_type, &fullname);
+                            let mut device_list_lock = device_list_arc.lock().unwrap();
+                            device_list_lock
+                                .disconnect_arc(cutoff_address(&fullname, Some(ARC_SERVICE)));
+                        }
+                        ServiceEvent::SearchStopped(service_type) => {
+                            error!("ARC Search Stopped: {}", &service_type);
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(100));
+            }
+        });
+
         Ok(())
     }
 
@@ -388,17 +521,76 @@ impl DanteDeviceManager {
     }
 
     pub fn get_device_names(&self) -> Vec<String> {
-        self.devices
+        self.device_list
             .lock()
             .unwrap()
             .devices
-            .iter()
-            .map(|(device, _)| device.to_owned())
+            .keys()
+            .map(|device| device.to_owned())
             .collect()
     }
+
+    pub fn get_device_descriptions(&self) -> Vec<String> {
+        let device_list = self.device_list.lock().unwrap();
+        let device_info_map = device_list.devices.iter().map(|(device, status)| {
+            (
+                device,
+                status,
+                device_list
+                    .caches
+                    .get(device)
+                    .expect("Should have a cache for any given connected device."),
+            )
+        });
+        device_info_map.into_iter()
+            .map(|(device, status, cache)| {
+                format!(
+                    "{}:\ndbc status: {}\ncmc status: {}\narc status: {}\nchan status: {}\nid: {}\nmanufacturer: {}\nmodel: {}\nrouter_vers: {}\nrouter_info: {}",
+                    device,
+                    match status.connected_dbc {
+                        true => "Connected",
+                        false => "Disconnected",
+                    },
+                    match status.connected_cmc {
+                        true => "Connected",
+                        false => "Disconnected",
+                    },
+                    match status.connected_arc {
+                        true => "Connected",
+                        false => "Disconnected",
+                    },
+                    match status.connected_chan {
+                        true => "Connected",
+                        false => "Disconnected",
+                    },
+                    match &cache.cmc_info {
+                        Some(cmc_info) => {cmc_info.id.to_owned()}
+                        None => "N/A".to_string()
+                    },
+                    match &cache.cmc_info {
+                        Some(cmc_info) => {cmc_info.manufacturer.to_owned()}
+                        None => "N/A".to_string()
+                    },
+                    match &cache.cmc_info {
+                        Some(cmc_info) => {cmc_info.model.to_owned()}
+                        None => "N/A".to_string()
+                    },
+                    match &cache.arc_info {
+                        Some(arc_info) => {arc_info.router_vers.to_owned()}
+                        None => "N/A".to_string()
+                    },
+                    match &cache.arc_info {
+                        Some(arc_info) => {arc_info.router_info.to_owned()}
+                        None => "N/A".to_string()
+                    }
+                )
+            })
+            .collect()
+    }
+
     pub fn new() -> Self {
         DanteDeviceManager {
-            devices: Arc::new(Mutex::new(DanteDeviceList::new())),
+            device_list: Arc::new(Mutex::new(DanteDeviceList::new())),
             running: Arc::new(Mutex::new(false)),
         }
     }
