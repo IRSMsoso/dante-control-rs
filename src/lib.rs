@@ -1,8 +1,13 @@
+use crate::DanteDeviceEncoding::{PCM16, PCM24, PCM32};
+use ascii::AsciiStr;
+use bytes::BytesMut;
 use log::{debug, error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-use std::net::Ipv4Addr;
+use std::hash::{Hash, Hasher};
+use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
@@ -59,6 +64,20 @@ struct CHANInfo {
     latency: Duration,
 }
 
+impl PartialEq<Self> for CHANInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for CHANInfo {}
+
+impl Hash for CHANInfo {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 #[derive(Debug)]
 struct DeviceAlreadyPresent {}
 
@@ -104,7 +123,7 @@ struct DeviceDiscoveryCache {
     dbc_info: Option<DBCInfo>,
     cmc_info: Option<CMCInfo>,
     arc_info: Option<ARCInfo>,
-    chan_info: Option<CHANInfo>,
+    chan_info: HashSet<CHANInfo>,
 }
 
 struct DanteDeviceList {
@@ -130,7 +149,7 @@ impl DanteDeviceList {
                     dbc_info: None,
                     cmc_info: None,
                     arc_info: None,
-                    chan_info: None,
+                    chan_info: HashSet::new(),
                 },
             );
         }
@@ -141,6 +160,55 @@ impl DanteDeviceList {
     fn try_add_device(&mut self, new_device_name: &str) {
         // Explicitly throw away error. If we already had one, Ok. If we make one, also Ok.
         let _ = self.add_device(new_device_name);
+    }
+
+    fn device_connected(&self, device_name: &str) -> bool {
+        self.devices.contains_key(device_name)
+    }
+
+    fn channel_id_exist(&self, device_name: &str, chan_id: u16) -> bool {
+        if !(self.device_connected(device_name)) {
+            return false;
+        }
+        match self.caches.get(device_name) {
+            Some(cache) => cache
+                .chan_info
+                .iter()
+                .any(|chan_info| chan_info.id == chan_id),
+            None => {
+                error!("Cache doesn't exist despite device being connected!");
+                false
+            }
+        }
+    }
+
+    fn get_channel_name_from_id(&self, device_name: &str, chan_id: u16) -> Option<&str> {
+        if !(self.device_connected(device_name)) {
+            return None;
+        }
+
+        match self.caches.get(device_name) {
+            Some(cache) => match cache
+                .chan_info
+                .iter()
+                .find(|chan_info| chan_info.id == chan_id)
+            {
+                Some(chan) => Some(&chan.name),
+                None => None,
+            },
+            None => {
+                error!("Cache doesn't exist despite device being connected!");
+                None
+            }
+        }
+    }
+
+    fn get_device_arc_ips(&self, device_name: &str) -> Option<&HashSet<Ipv4Addr>> {
+        if !(self.device_connected(device_name)) {
+            return None;
+        }
+
+        Some(&self.caches.get(device_name)?.arc_info.as_ref()?.addresses)
     }
 
     /// Updates the dbc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
@@ -175,7 +243,8 @@ impl DanteDeviceList {
         self.caches
             .get_mut(device_name)
             .expect("Tried updating cache of device that doesn't exist")
-            .chan_info = Some(info);
+            .chan_info
+            .replace(info);
         debug!("update_chan for {}", device_name);
     }
 
@@ -297,9 +366,28 @@ fn cutoff_address<'a>(hostname: &'a str, address: Option<&'a str>) -> &'a str {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum MakeSubscriptionError {
+    #[error("transmitter device not connected")]
+    TXDeviceNotConnected,
+    #[error("receiver device not connected")]
+    RXDeviceNotConnected,
+    #[error("transmitter channel doesn't exist")]
+    TXChannelNotExist,
+    #[error("receiver channel doesn't exist")]
+    RXChannelNotExist,
+    #[error("the device name + channel name byte length is greater than 107")]
+    TXChannelPlusDeviceNameLengthInvalid,
+    #[error("error sending udp packet")]
+    ConnectionFailed,
+    #[error("no arc ips have been captured")]
+    NoArcIPs,
+}
+
 pub struct DanteDeviceManager {
     device_list: Arc<Mutex<DanteDeviceList>>,
     running: Arc<Mutex<bool>>,
+    current_command_sequence_id: u16,
 }
 
 impl DanteDeviceManager {
@@ -509,7 +597,214 @@ impl DanteDeviceManager {
             }
         });
 
+        // Discovery for CHAN
+        let chan_receiver = mdns
+            .browse(CHAN_SERVICE)
+            .unwrap_or_else(|_| panic!("Failed to browse for {}", CHAN_SERVICE));
+
+        // Fresh Arcs to move into thread.
+        let device_list_chan = self.device_list.clone();
+        let running_chan = self.running.clone();
+
+        let chan_thread = std::thread::spawn(move || {
+            debug!("Starting discovery thread");
+            while *running_chan.lock().unwrap() {
+                while let Ok(event) = chan_receiver.try_recv() {
+                    match event {
+                        ServiceEvent::SearchStarted(service_type) => {
+                            debug!("CHAN Search Started: {}", &service_type);
+                        }
+                        ServiceEvent::ServiceFound(service_type, fullname) => {
+                            debug!("CHAN Search Found: {}, {}", &service_type, &fullname);
+                            let (chan_name, full_name) = fullname
+                                .split_once("@")
+                                .expect("CHAN fullname without \"@\" unexpected.");
+                            let device_name = cutoff_address(full_name, Some(CHAN_SERVICE));
+
+                            let mut device_list_lock = device_list_chan
+                                .lock()
+                                .expect("Cannot get mutex lock of DanteDevices");
+
+                            device_list_lock.connect_chan(device_name);
+                        }
+                        ServiceEvent::ServiceResolved(service_info) => {
+                            info!("CHAN Service Resolved: {:?}", &service_info);
+                            let (chan_name, full_name) = service_info
+                                .get_fullname()
+                                .split_once("@")
+                                .expect("CHAN fullname without \"@\" unexpected.");
+                            let device_name = cutoff_address(full_name, Some(CHAN_SERVICE));
+                            let mut device_list_lock = device_list_chan
+                                .lock()
+                                .expect("Cannot get mutex lock of DanteDevices");
+                            device_list_lock.update_chan(
+                                device_name,
+                                CHANInfo {
+                                    name: chan_name.to_owned(),
+                                    id: service_info
+                                        .get_property("id")
+                                        .expect("Should be able to get id property")
+                                        .val_str()
+                                        .parse()
+                                        .expect("Couldn't parse ID"),
+                                    sample_rate: service_info
+                                        .get_property("rate")
+                                        .expect("Should be able to get rate property")
+                                        .val_str()
+                                        .parse()
+                                        .expect("Couldn't parse rate"),
+                                    encoding: match service_info
+                                        .get_property("en")
+                                        .expect("Should be able to get encoding property")
+                                        .val_str()
+                                    {
+                                        "16" => PCM16,
+                                        "24" => PCM24,
+                                        "32" => PCM32,
+                                        &_ => {
+                                            panic!("\"en\" property couldn't be parsed into a valid encoding. IE: 16, 24, or 32");
+                                        }
+                                    },
+                                    latency: Duration::from_nanos(service_info.get_property("latency_ns").expect("Should be able to get latency_ns property").val_str().parse().expect("Couldn't parse latency_ns")),
+                                },
+                            );
+                        }
+                        ServiceEvent::ServiceRemoved(service_type, fullname) => {
+                            info!("CHAN Service Removed: a:{}, b:{}", &service_type, &fullname);
+                            let (chan_name, full_name) = fullname
+                                .split_once("@")
+                                .expect("CHAN fullname without \"@\" unexpected.");
+                            let device_name = cutoff_address(full_name, Some(CHAN_SERVICE));
+
+                            let mut device_list_lock = device_list_chan.lock().unwrap();
+                            device_list_lock.disconnect_chan(device_name);
+                        }
+                        ServiceEvent::SearchStopped(service_type) => {
+                            error!("CHAN Search Stopped: {}", &service_type);
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(100));
+            }
+        });
+
         Ok(())
+    }
+
+    fn get_new_command_sequence_id(&mut self) -> u16 {
+        let return_id = self.current_command_sequence_id;
+        self.current_command_sequence_id += 1;
+        return_id
+    }
+
+    const COMMAND_CHANNELCOUNT: [u8; 2] = 1000u16.to_be_bytes();
+    const COMMAND_DEVICEINFO: [u8; 2] = 1003u16.to_be_bytes();
+    const COMMAND_DEVICENAME: [u8; 2] = 1002u16.to_be_bytes();
+    const COMMAND_SUBSCRIPTION: [u8; 2] = 3010u16.to_be_bytes();
+    const COMMAND_RXCHANNELNAMES: [u8; 2] = 3000u16.to_be_bytes();
+    const COMMAND_TXCHANNELNAMES: [u8; 2] = 2010u16.to_be_bytes();
+    const COMMAND_SETRXCHANNELNAME: [u8; 2] = 12289u16.to_be_bytes();
+    const COMMAND_SETTXCHANNELNAME: [u8; 2] = 8211u16.to_be_bytes();
+    const COMMAND_SETDEVICENAME: [u8; 2] = 4097u16.to_be_bytes();
+
+    fn make_dante_command(&mut self, command: [u8; 2], command_args: &[u8]) -> BytesMut {
+        let mut buffer = bytes::BytesMut::new();
+        buffer.extend_from_slice(&[0x27, 0x29]);
+        assert_eq!(buffer.len(), 2);
+        buffer.extend_from_slice(&((command_args.len() + 11) as u16).to_be_bytes());
+        assert_eq!(buffer.len(), 4);
+        buffer.extend_from_slice(&self.get_new_command_sequence_id().to_be_bytes());
+        assert_eq!(buffer.len(), 6);
+        buffer.extend(command);
+        assert_eq!(buffer.len(), 8);
+        buffer.extend_from_slice(&[0x00, 0x00]);
+        assert_eq!(buffer.len(), 10);
+        buffer.extend_from_slice(&command_args);
+        buffer.extend_from_slice(&[0x00]);
+        buffer
+    }
+
+    fn send_bytes_to_addresses(
+        addresses: &HashSet<Ipv4Addr>,
+        port: u16,
+        bytes: &[u8],
+    ) -> Result<(), Box<dyn Error>> {
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        for address in addresses {
+            debug!("Sent bytes {:?} to {}:{}", bytes, address, port);
+            socket.send_to(bytes, (*address, port))?;
+        }
+        Ok(())
+    }
+
+    pub fn make_subscription(
+        &mut self,
+        rx_device: &AsciiStr,
+        rx_channel_id: u16,
+        tx_device: &AsciiStr,
+        tx_channel_id: u16,
+    ) -> Result<(), MakeSubscriptionError> {
+        let mut device_list_lock = self.device_list.lock().unwrap();
+
+        if !device_list_lock.device_connected(rx_device.as_str()) {
+            return Err(MakeSubscriptionError::RXDeviceNotConnected);
+        }
+        if !device_list_lock.device_connected(tx_device.as_str()) {
+            return Err(MakeSubscriptionError::TXDeviceNotConnected);
+        }
+        if !device_list_lock.channel_id_exist(rx_device.as_str(), rx_channel_id) {
+            return Err(MakeSubscriptionError::RXChannelNotExist);
+        }
+        if !device_list_lock.channel_id_exist(tx_device.as_str(), tx_channel_id) {
+            return Err(MakeSubscriptionError::TXChannelNotExist);
+        }
+
+        let tx_device_name_buffer = tx_device.as_bytes();
+        let tx_channel_name_buffer =
+            match device_list_lock.get_channel_name_from_id(tx_device.as_str(), tx_channel_id) {
+                Some(name) => name,
+                None => {
+                    return Err(MakeSubscriptionError::TXChannelNotExist);
+                }
+            }
+            .as_bytes();
+
+        let mut command_buffer = BytesMut::new();
+        command_buffer.extend_from_slice(&[0x04, 0x01]);
+        assert_eq!(command_buffer.len(), 2);
+        command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
+        assert_eq!(command_buffer.len(), 4);
+        command_buffer.extend_from_slice(&[0x00, 0x5c, 0x00, 0x6d]);
+        assert_eq!(command_buffer.len(), 8);
+        if (107 - tx_channel_name_buffer.len() as i32 - tx_device_name_buffer.len() as i32) < 0 {
+            return Err(MakeSubscriptionError::TXChannelPlusDeviceNameLengthInvalid);
+        }
+        command_buffer.extend_from_slice(&vec![
+            0x00;
+            107 - tx_channel_name_buffer.len()
+                - tx_device_name_buffer.len()
+        ]);
+        command_buffer.extend_from_slice(tx_channel_name_buffer);
+        command_buffer.extend_from_slice(&[0x00]);
+        command_buffer.extend_from_slice(tx_device_name_buffer);
+
+        let addresses = match device_list_lock.get_device_arc_ips(rx_device.as_str()) {
+            Some(addresses) => addresses.clone(),
+            None => {
+                return Err(MakeSubscriptionError::NoArcIPs);
+            }
+        };
+
+        drop(device_list_lock);
+
+        match Self::send_bytes_to_addresses(
+            &addresses,
+            0,
+            &self.make_dante_command(Self::COMMAND_SUBSCRIPTION, &command_buffer),
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(MakeSubscriptionError::ConnectionFailed),
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -544,8 +839,8 @@ impl DanteDeviceManager {
         });
         device_info_map.into_iter()
             .map(|(device, status, cache)| {
-                format!(
-                    "{}:\ndbc status: {}\ncmc status: {}\narc status: {}\nchan status: {}\nid: {}\nmanufacturer: {}\nmodel: {}\nrouter_vers: {}\nrouter_info: {}",
+                let mut info = format!(
+                    "{}:\ndbc status: {}\ncmc status: {}\narc status: {}\nchan status: {}\nid: {}\nmanufacturer: {}\nmodel: {}\nrouter_vers: {}\nrouter_info: {}\nARC port: {}",
                     device,
                     match status.connected_dbc {
                         true => "Connected",
@@ -582,8 +877,19 @@ impl DanteDeviceManager {
                     match &cache.arc_info {
                         Some(arc_info) => {arc_info.router_info.to_owned()}
                         None => "N/A".to_string()
+                    },
+                    match &cache.arc_info {
+                        Some(arc_info) => {arc_info.port.to_string()}
+                        None => "N/A".to_string()
                     }
-                )
+                );
+                info += "\nChannels:";
+                let mut chan_info_sorted: Vec<&CHANInfo> = cache.chan_info.iter().collect();
+                chan_info_sorted.sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
+                for chan_info in chan_info_sorted {
+                    info += &format!("\n\"{}\"", chan_info.name);
+                }
+                info
             })
             .collect()
     }
@@ -592,6 +898,7 @@ impl DanteDeviceManager {
         DanteDeviceManager {
             device_list: Arc::new(Mutex::new(DanteDeviceList::new())),
             running: Arc::new(Mutex::new(false)),
+            current_command_sequence_id: 0,
         }
     }
 }
