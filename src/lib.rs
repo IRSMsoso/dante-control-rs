@@ -58,10 +58,10 @@ struct ARCInfo {
 #[derive(Clone)]
 struct CHANInfo {
     name: String,
-    id: u16,
-    sample_rate: u32,
-    encoding: DanteDeviceEncoding,
-    latency: Duration,
+    id: Option<u16>,
+    sample_rate: Option<u32>,
+    encoding: Option<DanteDeviceEncoding>,
+    latency: Option<Duration>,
 }
 
 impl PartialEq<Self> for CHANInfo {
@@ -174,7 +174,10 @@ impl DanteDeviceList {
             Some(cache) => cache
                 .chan_info
                 .iter()
-                .any(|chan_info| chan_info.id == chan_id),
+                .any(|chan_info| match chan_info.id {
+                    Some(chan_info_id) => chan_info_id == chan_id,
+                    None => false
+                }),
             None => {
                 error!("Cache doesn't exist despite device being connected!");
                 false
@@ -191,7 +194,10 @@ impl DanteDeviceList {
             Some(cache) => match cache
                 .chan_info
                 .iter()
-                .find(|chan_info| chan_info.id == chan_id)
+                .find(|chan_info| match chan_info.id {
+                    Some(chan_info_id) => chan_info_id == chan_id,
+                    None => false
+                })
             {
                 Some(chan) => Some(&chan.name),
                 None => None,
@@ -495,13 +501,10 @@ impl DanteDeviceManager {
                                 CMCInfo {
                                     addresses: service_info.get_addresses().to_owned(),
                                     port: service_info.get_port().to_owned(),
-                                    id: service_info
-                                        .get_property("id")
-                                        .expect(
-                                            "Could not retrieve \"id\" property from cmc service",
-                                        )
-                                        .val_str()
-                                        .to_owned(),
+                                    id: match service_info.get_property("id"){
+                                        Some(id_property) => id_property.val_str().to_owned(),
+                                        None => "N/A".to_string()
+                                    },
                                     manufacturer: match service_info.get_property("mf") {
                                         Some(mf_property) => mf_property.val_str().to_owned(),
                                         None => "N/A".to_string(),
@@ -641,31 +644,32 @@ impl DanteDeviceManager {
                                 device_name,
                                 CHANInfo {
                                     name: chan_name.to_owned(),
-                                    id: service_info
-                                        .get_property("id")
-                                        .expect("Should be able to get id property")
-                                        .val_str()
-                                        .parse()
-                                        .expect("Couldn't parse ID"),
-                                    sample_rate: service_info
-                                        .get_property("rate")
-                                        .expect("Should be able to get rate property")
-                                        .val_str()
-                                        .parse()
-                                        .expect("Couldn't parse rate"),
-                                    encoding: match service_info
-                                        .get_property("en")
-                                        .expect("Should be able to get encoding property")
-                                        .val_str()
-                                    {
-                                        "16" => PCM16,
-                                        "24" => PCM24,
-                                        "32" => PCM32,
-                                        &_ => {
-                                            panic!("\"en\" property couldn't be parsed into a valid encoding. IE: 16, 24, or 32");
-                                        }
+                                    id: match service_info.get_property("id"){
+                                        Some(id_property) => Some(id_property.val_str().to_owned().parse().expect("Couldn't parse chan service id")),
+                                        None => None
                                     },
-                                    latency: Duration::from_nanos(service_info.get_property("latency_ns").expect("Should be able to get latency_ns property").val_str().parse().expect("Couldn't parse latency_ns")),
+                                    sample_rate: match service_info.get_property("rate") {
+                                        Some(rate_property) => rate_property.val_str().parse().ok(),
+                                        None => None
+                                    },
+                                    encoding: match service_info.get_property("en") {
+                                        Some(encoding_property) => {
+                                            match encoding_property.val_str() {
+                                                "16" => Some(PCM16),
+                                                "24" => Some(PCM24),
+                                                "32" => Some(PCM32),
+                                                &_ => None
+                                            }
+                                        },
+                                        None => None
+                                    },
+                                    latency: match service_info.get_property("latency_ns") {
+                                        Some(latency_property) => match latency_property.val_str().parse().ok() {
+                                            Some(a) => Some(Duration::from_nanos(a)),
+                                            None => None
+                                        },
+                                        None => None
+                                    }
                                 },
                             );
                         }
@@ -700,7 +704,7 @@ impl DanteDeviceManager {
     const COMMAND_CHANNELCOUNT: [u8; 2] = 1000u16.to_be_bytes();
     const COMMAND_DEVICEINFO: [u8; 2] = 1003u16.to_be_bytes();
     const COMMAND_DEVICENAME: [u8; 2] = 1002u16.to_be_bytes();
-    const COMMAND_SUBSCRIPTION: [u8; 2] = 3010u16.to_be_bytes();
+    const COMMAND_SUBSCRIPTION: [u8; 2] = [0x34, 0x10];
     const COMMAND_RXCHANNELNAMES: [u8; 2] = 3000u16.to_be_bytes();
     const COMMAND_TXCHANNELNAMES: [u8; 2] = 2010u16.to_be_bytes();
     const COMMAND_SETRXCHANNELNAME: [u8; 2] = 12289u16.to_be_bytes();
@@ -709,9 +713,9 @@ impl DanteDeviceManager {
 
     fn make_dante_command(&mut self, command: [u8; 2], command_args: &[u8]) -> BytesMut {
         let mut buffer = bytes::BytesMut::new();
-        buffer.extend_from_slice(&[0x27, 0x29]);
+        buffer.extend_from_slice(&[0x28, 0x30]);
         assert_eq!(buffer.len(), 2);
-        buffer.extend_from_slice(&((command_args.len() + 11) as u16).to_be_bytes());
+        buffer.extend_from_slice(&((command_args.len() + 10) as u16).to_be_bytes());
         assert_eq!(buffer.len(), 4);
         buffer.extend_from_slice(&self.get_new_command_sequence_id().to_be_bytes());
         assert_eq!(buffer.len(), 6);
@@ -720,7 +724,6 @@ impl DanteDeviceManager {
         buffer.extend_from_slice(&[0x00, 0x00]);
         assert_eq!(buffer.len(), 10);
         buffer.extend_from_slice(&command_args);
-        buffer.extend_from_slice(&[0x00]);
         buffer
     }
 
@@ -731,7 +734,7 @@ impl DanteDeviceManager {
     ) -> Result<(), Box<dyn Error>> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         for address in addresses {
-            debug!("Sent bytes {:?} to {}:{}", bytes, address, port);
+            debug!("Sent bytes {:?} to {}:{}", hex::encode(bytes), address, port);
             socket.send_to(bytes, (*address, port))?;
         }
         Ok(())
@@ -742,7 +745,7 @@ impl DanteDeviceManager {
         rx_device: &AsciiStr,
         rx_channel_id: u16,
         tx_device: &AsciiStr,
-        tx_channel_id: u16,
+        tx_channel: &AsciiStr,
     ) -> Result<(), MakeSubscriptionError> {
         let mut device_list_lock = self.device_list.lock().unwrap();
 
@@ -752,41 +755,35 @@ impl DanteDeviceManager {
         if !device_list_lock.device_connected(tx_device.as_str()) {
             return Err(MakeSubscriptionError::TXDeviceNotConnected);
         }
+        // Finding a channel or not in mdns is not always indicative of whether it actually exists.
+        /*
         if !device_list_lock.channel_id_exist(rx_device.as_str(), rx_channel_id) {
             return Err(MakeSubscriptionError::RXChannelNotExist);
         }
         if !device_list_lock.channel_id_exist(tx_device.as_str(), tx_channel_id) {
             return Err(MakeSubscriptionError::TXChannelNotExist);
         }
+        */
 
         let tx_device_name_buffer = tx_device.as_bytes();
-        let tx_channel_name_buffer =
-            match device_list_lock.get_channel_name_from_id(tx_device.as_str(), tx_channel_id) {
-                Some(name) => name,
-                None => {
-                    return Err(MakeSubscriptionError::TXChannelNotExist);
-                }
-            }
-            .as_bytes();
+        let tx_channel_name_buffer = tx_channel.as_bytes();
 
         let mut command_buffer = BytesMut::new();
-        command_buffer.extend_from_slice(&[0x04, 0x01]);
-        assert_eq!(command_buffer.len(), 2);
+        command_buffer.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01]);
+        assert_eq!(command_buffer.len(), 10);
         command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
-        assert_eq!(command_buffer.len(), 4);
-        command_buffer.extend_from_slice(&[0x00, 0x5c, 0x00, 0x6d]);
-        assert_eq!(command_buffer.len(), 8);
-        if (107 - tx_channel_name_buffer.len() as i32 - tx_device_name_buffer.len() as i32) < 0 {
-            return Err(MakeSubscriptionError::TXChannelPlusDeviceNameLengthInvalid);
-        }
-        command_buffer.extend_from_slice(&vec![
-            0x00;
-            107 - tx_channel_name_buffer.len()
-                - tx_device_name_buffer.len()
-        ]);
+        assert_eq!(command_buffer.len(), 12);
+        command_buffer.extend_from_slice(&[0x00, 0x03, 0x01, 0x14]);
+        assert_eq!(command_buffer.len(), 16);
+        let end_pos:u16 = (276 + tx_channel_name_buffer.len() + 1) as u16;
+        command_buffer.extend_from_slice(&end_pos.to_be_bytes());
+        assert_eq!(command_buffer.len(), 18);
+        command_buffer.extend_from_slice(&vec![0x00; 248]);
+        assert_eq!(command_buffer.len(), 266);
         command_buffer.extend_from_slice(tx_channel_name_buffer);
         command_buffer.extend_from_slice(&[0x00]);
         command_buffer.extend_from_slice(tx_device_name_buffer);
+        command_buffer.extend_from_slice(&[0x00]);
 
         let addresses = match device_list_lock.get_device_arc_ips(rx_device.as_str()) {
             Some(addresses) => addresses.clone(),
@@ -795,11 +792,23 @@ impl DanteDeviceManager {
             }
         };
 
+
+        let port = match device_list_lock.caches.get(rx_device.as_str()) {
+            Some(discovery_cache) => {
+                match &discovery_cache.arc_info {
+                    Some(info) => info.port,
+                    None => 4440
+                }
+            },
+            None => 4440
+        };
+
         drop(device_list_lock);
+
 
         match Self::send_bytes_to_addresses(
             &addresses,
-            0,
+            port,
             &self.make_dante_command(Self::COMMAND_SUBSCRIPTION, &command_buffer),
         ) {
             Ok(_) => Ok(()),

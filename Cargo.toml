@@ -1,6 +1,6 @@
 [package]
 name = "dante-control-rs"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Cameron VanderTuig"]
 description = "Dante discovery and control as a rust library"
@@ -18,3 +18,4 @@ log = "0.4.20"
 bytes = "1.4.0"
 thiserror = "1.0.47"
 ascii = "1.1.0"
+hex = "0.4.3"
