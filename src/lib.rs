@@ -171,13 +171,10 @@ impl DanteDeviceList {
             return false;
         }
         match self.caches.get(device_name) {
-            Some(cache) => cache
-                .chan_info
-                .iter()
-                .any(|chan_info| match chan_info.id {
-                    Some(chan_info_id) => chan_info_id == chan_id,
-                    None => false
-                }),
+            Some(cache) => cache.chan_info.iter().any(|chan_info| match chan_info.id {
+                Some(chan_info_id) => chan_info_id == chan_id,
+                None => false,
+            }),
             None => {
                 error!("Cache doesn't exist despite device being connected!");
                 false
@@ -191,14 +188,10 @@ impl DanteDeviceList {
         }
 
         match self.caches.get(device_name) {
-            Some(cache) => match cache
-                .chan_info
-                .iter()
-                .find(|chan_info| match chan_info.id {
-                    Some(chan_info_id) => chan_info_id == chan_id,
-                    None => false
-                })
-            {
+            Some(cache) => match cache.chan_info.iter().find(|chan_info| match chan_info.id {
+                Some(chan_info_id) => chan_info_id == chan_id,
+                None => false,
+            }) {
                 Some(chan) => Some(&chan.name),
                 None => None,
             },
@@ -209,12 +202,29 @@ impl DanteDeviceList {
         }
     }
 
-    fn get_device_arc_ips(&self, device_name: &str) -> Option<&HashSet<Ipv4Addr>> {
+    fn get_device_ips(&self, device_name: &str) -> Option<HashSet<Ipv4Addr>> {
         if !(self.device_connected(device_name)) {
             return None;
         }
 
-        Some(&self.caches.get(device_name)?.arc_info.as_ref()?.addresses)
+        let mut device_ips: HashSet<Ipv4Addr> = HashSet::new();
+
+        match self.caches.get(device_name) {
+            None => return None,
+            Some(caches) => {
+                if let Some(arc_info) = &caches.arc_info {
+                    device_ips.extend(&arc_info.addresses);
+                }
+                if let Some(dbc_info) = &caches.dbc_info {
+                    device_ips.extend(&dbc_info.addresses);
+                }
+                if let Some(cmc_info) = &caches.cmc_info {
+                    device_ips.extend(&cmc_info.addresses);
+                }
+            }
+        }
+
+        Some(device_ips)
     }
 
     /// Updates the dbc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
@@ -374,20 +384,13 @@ fn cutoff_address<'a>(hostname: &'a str, address: Option<&'a str>) -> &'a str {
 
 #[derive(thiserror::Error, Debug)]
 pub enum MakeSubscriptionError {
-    #[error("transmitter device not connected")]
-    TXDeviceNotConnected,
-    #[error("receiver device not connected")]
-    RXDeviceNotConnected,
-    #[error("transmitter channel doesn't exist")]
-    TXChannelNotExist,
-    #[error("receiver channel doesn't exist")]
-    RXChannelNotExist,
-    #[error("the device name + channel name byte length is greater than 107")]
-    TXChannelPlusDeviceNameLengthInvalid,
     #[error("error sending udp packet")]
     ConnectionFailed,
-    #[error("no arc ips have been captured")]
-    NoArcIPs,
+}
+#[derive(thiserror::Error, Debug)]
+pub enum ClearSubscriptionError {
+    #[error("error sending udp packet")]
+    ConnectionFailed,
 }
 
 pub struct DanteDeviceManager {
@@ -501,9 +504,9 @@ impl DanteDeviceManager {
                                 CMCInfo {
                                     addresses: service_info.get_addresses().to_owned(),
                                     port: service_info.get_port().to_owned(),
-                                    id: match service_info.get_property("id"){
+                                    id: match service_info.get_property("id") {
                                         Some(id_property) => id_property.val_str().to_owned(),
-                                        None => "N/A".to_string()
+                                        None => "N/A".to_string(),
                                     },
                                     manufacturer: match service_info.get_property("mf") {
                                         Some(mf_property) => mf_property.val_str().to_owned(),
@@ -644,13 +647,19 @@ impl DanteDeviceManager {
                                 device_name,
                                 CHANInfo {
                                     name: chan_name.to_owned(),
-                                    id: match service_info.get_property("id"){
-                                        Some(id_property) => Some(id_property.val_str().to_owned().parse().expect("Couldn't parse chan service id")),
-                                        None => None
+                                    id: match service_info.get_property("id") {
+                                        Some(id_property) => Some(
+                                            id_property
+                                                .val_str()
+                                                .to_owned()
+                                                .parse()
+                                                .expect("Couldn't parse chan service id"),
+                                        ),
+                                        None => None,
                                     },
                                     sample_rate: match service_info.get_property("rate") {
                                         Some(rate_property) => rate_property.val_str().parse().ok(),
-                                        None => None
+                                        None => None,
                                     },
                                     encoding: match service_info.get_property("en") {
                                         Some(encoding_property) => {
@@ -658,18 +667,20 @@ impl DanteDeviceManager {
                                                 "16" => Some(PCM16),
                                                 "24" => Some(PCM24),
                                                 "32" => Some(PCM32),
-                                                &_ => None
+                                                &_ => None,
                                             }
-                                        },
-                                        None => None
+                                        }
+                                        None => None,
                                     },
                                     latency: match service_info.get_property("latency_ns") {
-                                        Some(latency_property) => match latency_property.val_str().parse().ok() {
-                                            Some(a) => Some(Duration::from_nanos(a)),
-                                            None => None
-                                        },
-                                        None => None
-                                    }
+                                        Some(latency_property) => {
+                                            match latency_property.val_str().parse().ok() {
+                                                Some(a) => Some(Duration::from_nanos(a)),
+                                                None => None,
+                                            }
+                                        }
+                                        None => None,
+                                    },
                                 },
                             );
                         }
@@ -734,48 +745,54 @@ impl DanteDeviceManager {
     ) -> Result<(), Box<dyn Error>> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         for address in addresses {
-            debug!("Sent bytes {:?} to {}:{}", hex::encode(bytes), address, port);
+            debug!(
+                "Sent bytes {:?} to {}:{}",
+                hex::encode(bytes),
+                address,
+                port
+            );
             socket.send_to(bytes, (*address, port))?;
         }
         Ok(())
     }
 
+    fn send_bytes_to_address(
+        address: &Ipv4Addr,
+        port: u16,
+        bytes: &[u8],
+    ) -> Result<(), Box<dyn Error>> {
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+
+        debug!(
+            "Sent bytes {:?} to {}:{}",
+            hex::encode(bytes),
+            address,
+            port
+        );
+        socket.send_to(bytes, (*address, port))?;
+
+        Ok(())
+    }
+
     pub fn make_subscription(
         &mut self,
-        rx_device: &AsciiStr,
+        rx_device_ip: &Ipv4Addr,
         rx_channel_id: u16,
         tx_device: &AsciiStr,
         tx_channel: &AsciiStr,
     ) -> Result<(), MakeSubscriptionError> {
-        let mut device_list_lock = self.device_list.lock().unwrap();
-
-        if !device_list_lock.device_connected(rx_device.as_str()) {
-            return Err(MakeSubscriptionError::RXDeviceNotConnected);
-        }
-        if !device_list_lock.device_connected(tx_device.as_str()) {
-            return Err(MakeSubscriptionError::TXDeviceNotConnected);
-        }
-        // Finding a channel or not in mdns is not always indicative of whether it actually exists.
-        /*
-        if !device_list_lock.channel_id_exist(rx_device.as_str(), rx_channel_id) {
-            return Err(MakeSubscriptionError::RXChannelNotExist);
-        }
-        if !device_list_lock.channel_id_exist(tx_device.as_str(), tx_channel_id) {
-            return Err(MakeSubscriptionError::TXChannelNotExist);
-        }
-        */
-
         let tx_device_name_buffer = tx_device.as_bytes();
         let tx_channel_name_buffer = tx_channel.as_bytes();
 
         let mut command_buffer = BytesMut::new();
-        command_buffer.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01]);
+        command_buffer
+            .extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01]);
         assert_eq!(command_buffer.len(), 10);
         command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
         assert_eq!(command_buffer.len(), 12);
         command_buffer.extend_from_slice(&[0x00, 0x03, 0x01, 0x14]);
         assert_eq!(command_buffer.len(), 16);
-        let end_pos:u16 = (276 + tx_channel_name_buffer.len() + 1) as u16;
+        let end_pos: u16 = (276 + tx_channel_name_buffer.len() + 1) as u16;
         command_buffer.extend_from_slice(&end_pos.to_be_bytes());
         assert_eq!(command_buffer.len(), 18);
         command_buffer.extend_from_slice(&vec![0x00; 248]);
@@ -785,29 +802,38 @@ impl DanteDeviceManager {
         command_buffer.extend_from_slice(tx_device_name_buffer);
         command_buffer.extend_from_slice(&[0x00]);
 
-        let addresses = match device_list_lock.get_device_arc_ips(rx_device.as_str()) {
-            Some(addresses) => addresses.clone(),
-            None => {
-                return Err(MakeSubscriptionError::NoArcIPs);
-            }
-        };
+        let port: u16 = 4440;
 
+        match Self::send_bytes_to_address(
+            rx_device_ip,
+            port,
+            &self.make_dante_command(Self::COMMAND_SUBSCRIPTION, &command_buffer),
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(MakeSubscriptionError::ConnectionFailed),
+        }
+    }
 
-        let port = match device_list_lock.caches.get(rx_device.as_str()) {
-            Some(discovery_cache) => {
-                match &discovery_cache.arc_info {
-                    Some(info) => info.port,
-                    None => 4440
-                }
-            },
-            None => 4440
-        };
+    pub fn clear_subscription(
+        &mut self,
+        rx_device_ip: &Ipv4Addr,
+        rx_channel_id: u16,
+    ) -> Result<(), MakeSubscriptionError> {
+        let mut command_buffer = BytesMut::new();
+        command_buffer
+            .extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01]);
+        assert_eq!(command_buffer.len(), 10);
+        command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
+        assert_eq!(command_buffer.len(), 12);
+        command_buffer.extend_from_slice(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(command_buffer.len(), 18);
+        command_buffer.extend_from_slice(&vec![0x00; 248]);
+        assert_eq!(command_buffer.len(), 266);
 
-        drop(device_list_lock);
+        let port: u16 = 4440;
 
-
-        match Self::send_bytes_to_addresses(
-            &addresses,
+        match Self::send_bytes_to_address(
+            rx_device_ip,
             port,
             &self.make_dante_command(Self::COMMAND_SUBSCRIPTION, &command_buffer),
         ) {
@@ -849,7 +875,7 @@ impl DanteDeviceManager {
         device_info_map.into_iter()
             .map(|(device, status, cache)| {
                 let mut info = format!(
-                    "{}:\ndbc status: {}\ncmc status: {}\narc status: {}\nchan status: {}\nid: {}\nmanufacturer: {}\nmodel: {}\nrouter_vers: {}\nrouter_info: {}\nARC port: {}",
+                    "{}:\ndbc status: {}\ncmc status: {}\narc status: {}\nchan status: {}\nid: {}\nmanufacturer: {}\nmodel: {}\nrouter_vers: {}\nrouter_info: {}\nARC port: {}\nIP: {}",
                     device,
                     match status.connected_dbc {
                         true => "Connected",
@@ -889,6 +915,10 @@ impl DanteDeviceManager {
                     },
                     match &cache.arc_info {
                         Some(arc_info) => {arc_info.port.to_string()}
+                        None => "N/A".to_string()
+                    },
+                    match &cache.arc_info {
+                        Some(arc_info) => {format!("{:?}", &arc_info.addresses)}
                         None => "N/A".to_string()
                     }
                 );
