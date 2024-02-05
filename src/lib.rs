@@ -25,6 +25,52 @@ const DEVICE_INFO_SRC_PORT2: u32 = 1030;
 
 const DEVICE_SETTINGS_PORT: u32 = 8700;
 
+pub enum DanteVersion {
+    Dante4_4_1_3,
+    Dante4_2_1_3,
+}
+
+impl DanteVersion {
+    fn get_commands(self) -> DanteVersionCommands {
+        match self {
+            DanteVersion::Dante4_4_1_3 => DANTECOMMANDS_4_4_1_3,
+            DanteVersion::Dante4_2_1_3 => DANTECOMMANDS_4_2_1_3,
+        }
+    }
+
+    pub fn from_string(string: &str) -> Option<Self> {
+        match string {
+            "4.4.1.3" => Some(Self::Dante4_4_1_3),
+            "4.2.1.3" => Some(Self::Dante4_2_1_3),
+            _ => None,
+        }
+    }
+}
+
+struct DanteVersionCommands {
+    command_subscription: [u8; 2],
+}
+
+// Command IDs for different Dante Versions.
+const DANTECOMMANDS_4_4_1_3: DanteVersionCommands = DanteVersionCommands {
+    command_subscription: [0x34, 0x10],
+};
+const DANTECOMMANDS_4_2_1_3: DanteVersionCommands = DanteVersionCommands {
+    command_subscription: [0x30, 0x10],
+};
+
+// Still need to figure these out.
+/*
+const COMMAND_CHANNELCOUNT: [u8; 2] = 1000u16.to_be_bytes();
+const COMMAND_DEVICEINFO: [u8; 2] = 1003u16.to_be_bytes();
+const COMMAND_DEVICENAME: [u8; 2] = 1002u16.to_be_bytes();
+const COMMAND_RXCHANNELNAMES: [u8; 2] = 3000u16.to_be_bytes();
+const COMMAND_TXCHANNELNAMES: [u8; 2] = 2010u16.to_be_bytes();
+const COMMAND_SETRXCHANNELNAME: [u8; 2] = 12289u16.to_be_bytes();
+const COMMAND_SETTXCHANNELNAME: [u8; 2] = 8211u16.to_be_bytes();
+const COMMAND_SETDEVICENAME: [u8; 2] = 4097u16.to_be_bytes();
+ */
+
 #[derive(Clone)]
 enum DanteDeviceEncoding {
     PCM16,
@@ -227,7 +273,7 @@ impl DanteDeviceList {
         Some(device_ips)
     }
 
-    /// Updates the dbc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
+    /// Updates the dbc info of device in the list with a specific name.
     fn update_dbc(&mut self, device_name: &str, info: DBCInfo) {
         self.caches
             .get_mut(device_name)
@@ -236,7 +282,7 @@ impl DanteDeviceList {
         debug!("update_dbc for {}", device_name);
     }
 
-    /// Updates the cmc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
+    /// Updates the cmc info of device in the list with a specific name.
     fn update_cmc(&mut self, device_name: &str, info: CMCInfo) {
         self.caches
             .get_mut(device_name)
@@ -245,7 +291,7 @@ impl DanteDeviceList {
         debug!("update_cmc for {}", device_name);
     }
 
-    /// Updates the arc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
+    /// Updates the arc info of device in the list with a specific name.
     fn update_arc(&mut self, device_name: &str, info: ARCInfo) {
         self.caches
             .get_mut(device_name)
@@ -254,7 +300,7 @@ impl DanteDeviceList {
         debug!("update_arc for {}", device_name);
     }
 
-    /// Updates the cmc info of device in the list with a specific name. If it doesn't exist, will add it then update it.
+    /// Updates the cmc info of device in the list with a specific name.
     fn update_chan(&mut self, device_name: &str, info: CHANInfo) {
         self.caches
             .get_mut(device_name)
@@ -647,16 +693,13 @@ impl DanteDeviceManager {
                                 device_name,
                                 CHANInfo {
                                     name: chan_name.to_owned(),
-                                    id: match service_info.get_property("id") {
-                                        Some(id_property) => Some(
-                                            id_property
-                                                .val_str()
-                                                .to_owned()
-                                                .parse()
-                                                .expect("Couldn't parse chan service id"),
-                                        ),
-                                        None => None,
-                                    },
+                                    id: service_info.get_property("id").map(|id_property| {
+                                        id_property
+                                            .val_str()
+                                            .to_owned()
+                                            .parse()
+                                            .expect("Couldn't parse chan service id")
+                                    }),
                                     sample_rate: match service_info.get_property("rate") {
                                         Some(rate_property) => rate_property.val_str().parse().ok(),
                                         None => None,
@@ -673,12 +716,11 @@ impl DanteDeviceManager {
                                         None => None,
                                     },
                                     latency: match service_info.get_property("latency_ns") {
-                                        Some(latency_property) => {
-                                            match latency_property.val_str().parse().ok() {
-                                                Some(a) => Some(Duration::from_nanos(a)),
-                                                None => None,
-                                            }
-                                        }
+                                        Some(latency_property) => latency_property
+                                            .val_str()
+                                            .parse()
+                                            .ok()
+                                            .map(Duration::from_nanos),
                                         None => None,
                                     },
                                 },
@@ -711,16 +753,6 @@ impl DanteDeviceManager {
         self.current_command_sequence_id += 1;
         return_id
     }
-
-    const COMMAND_CHANNELCOUNT: [u8; 2] = 1000u16.to_be_bytes();
-    const COMMAND_DEVICEINFO: [u8; 2] = 1003u16.to_be_bytes();
-    const COMMAND_DEVICENAME: [u8; 2] = 1002u16.to_be_bytes();
-    const COMMAND_SUBSCRIPTION: [u8; 2] = [0x34, 0x10];
-    const COMMAND_RXCHANNELNAMES: [u8; 2] = 3000u16.to_be_bytes();
-    const COMMAND_TXCHANNELNAMES: [u8; 2] = 2010u16.to_be_bytes();
-    const COMMAND_SETRXCHANNELNAME: [u8; 2] = 12289u16.to_be_bytes();
-    const COMMAND_SETTXCHANNELNAME: [u8; 2] = 8211u16.to_be_bytes();
-    const COMMAND_SETDEVICENAME: [u8; 2] = 4097u16.to_be_bytes();
 
     fn make_dante_command(&mut self, command: [u8; 2], command_args: &[u8]) -> BytesMut {
         let mut buffer = bytes::BytesMut::new();
@@ -776,6 +808,7 @@ impl DanteDeviceManager {
 
     pub fn make_subscription(
         &mut self,
+        version: DanteVersion,
         rx_device_ip: &Ipv4Addr,
         rx_channel_id: u16,
         tx_device: &AsciiStr,
@@ -784,30 +817,53 @@ impl DanteDeviceManager {
         let tx_device_name_buffer = tx_device.as_bytes();
         let tx_channel_name_buffer = tx_channel.as_bytes();
 
-        let mut command_buffer = BytesMut::new();
-        command_buffer
-            .extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01]);
-        assert_eq!(command_buffer.len(), 10);
-        command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
-        assert_eq!(command_buffer.len(), 12);
-        command_buffer.extend_from_slice(&[0x00, 0x03, 0x01, 0x14]);
-        assert_eq!(command_buffer.len(), 16);
-        let end_pos: u16 = (276 + tx_channel_name_buffer.len() + 1) as u16;
-        command_buffer.extend_from_slice(&end_pos.to_be_bytes());
-        assert_eq!(command_buffer.len(), 18);
-        command_buffer.extend_from_slice(&vec![0x00; 248]);
-        assert_eq!(command_buffer.len(), 266);
-        command_buffer.extend_from_slice(tx_channel_name_buffer);
-        command_buffer.extend_from_slice(&[0x00]);
-        command_buffer.extend_from_slice(tx_device_name_buffer);
-        command_buffer.extend_from_slice(&[0x00]);
-
         let port: u16 = 4440;
+
+        let mut command_buffer = BytesMut::new();
+
+        match version {
+            DanteVersion::Dante4_4_1_3 => {
+                command_buffer.extend_from_slice(&[
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01,
+                ]);
+                assert_eq!(command_buffer.len(), 10);
+                command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
+                assert_eq!(command_buffer.len(), 12);
+                command_buffer.extend_from_slice(&[0x00, 0x03, 0x01, 0x14]);
+                assert_eq!(command_buffer.len(), 16);
+                let end_pos: u16 = (276 + tx_channel_name_buffer.len() + 1) as u16;
+                command_buffer.extend_from_slice(&end_pos.to_be_bytes());
+                assert_eq!(command_buffer.len(), 18);
+                command_buffer.extend_from_slice(&vec![0x00; 248]);
+                assert_eq!(command_buffer.len(), 266);
+                command_buffer.extend_from_slice(tx_channel_name_buffer);
+                command_buffer.extend_from_slice(&[0x00]);
+                command_buffer.extend_from_slice(tx_device_name_buffer);
+                command_buffer.extend_from_slice(&[0x00]);
+            }
+            DanteVersion::Dante4_2_1_3 => {
+                command_buffer.extend_from_slice(&[0x10, 0x01]);
+                assert_eq!(command_buffer.len(), 2);
+                command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
+                assert_eq!(command_buffer.len(), 4);
+                command_buffer.extend_from_slice(&[0x01, 0x4C]);
+                assert_eq!(command_buffer.len(), 6);
+                let end_pos: u16 = (332 + tx_channel_name_buffer.len() + 1) as u16;
+                command_buffer.extend_from_slice(&end_pos.to_be_bytes());
+                assert_eq!(command_buffer.len(), 8);
+                command_buffer.extend_from_slice(&vec![0x00; 314]);
+                assert_eq!(command_buffer.len(), 322);
+                command_buffer.extend_from_slice(tx_channel_name_buffer);
+                command_buffer.extend_from_slice(&[0x00]);
+                command_buffer.extend_from_slice(tx_device_name_buffer);
+                command_buffer.extend_from_slice(&[0x00]);
+            }
+        }
 
         match Self::send_bytes_to_address(
             rx_device_ip,
             port,
-            &self.make_dante_command(Self::COMMAND_SUBSCRIPTION, &command_buffer),
+            &self.make_dante_command(version.get_commands().command_subscription, &command_buffer),
         ) {
             Ok(_) => Ok(()),
             Err(_) => Err(MakeSubscriptionError::ConnectionFailed),
@@ -816,6 +872,7 @@ impl DanteDeviceManager {
 
     pub fn clear_subscription(
         &mut self,
+        version: DanteVersion,
         rx_device_ip: &Ipv4Addr,
         rx_channel_id: u16,
     ) -> Result<(), MakeSubscriptionError> {
@@ -835,7 +892,7 @@ impl DanteDeviceManager {
         match Self::send_bytes_to_address(
             rx_device_ip,
             port,
-            &self.make_dante_command(Self::COMMAND_SUBSCRIPTION, &command_buffer),
+            &self.make_dante_command(version.get_commands().command_subscription, &command_buffer),
         ) {
             Ok(_) => Ok(()),
             Err(_) => Err(MakeSubscriptionError::ConnectionFailed),
