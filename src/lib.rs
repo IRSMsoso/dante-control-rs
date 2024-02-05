@@ -877,15 +877,29 @@ impl DanteDeviceManager {
         rx_channel_id: u16,
     ) -> Result<(), MakeSubscriptionError> {
         let mut command_buffer = BytesMut::new();
-        command_buffer
-            .extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01]);
-        assert_eq!(command_buffer.len(), 10);
-        command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
-        assert_eq!(command_buffer.len(), 12);
-        command_buffer.extend_from_slice(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00]);
-        assert_eq!(command_buffer.len(), 18);
-        command_buffer.extend_from_slice(&vec![0x00; 248]);
-        assert_eq!(command_buffer.len(), 266);
+
+        match version {
+            DanteVersion::Dante4_4_1_3 => {
+                command_buffer.extend_from_slice(&[
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x20, 0x01,
+                ]);
+                assert_eq!(command_buffer.len(), 10);
+                command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
+                assert_eq!(command_buffer.len(), 12);
+                command_buffer.extend_from_slice(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00]);
+                assert_eq!(command_buffer.len(), 18);
+                command_buffer.extend_from_slice(&vec![0x00; 248]);
+                assert_eq!(command_buffer.len(), 266);
+            }
+            DanteVersion::Dante4_2_1_3 => {
+                command_buffer.extend_from_slice(&[0x10, 0x01]);
+                assert_eq!(command_buffer.len(), 2);
+                command_buffer.extend_from_slice(&rx_channel_id.to_be_bytes());
+                assert_eq!(command_buffer.len(), 4);
+                command_buffer.extend_from_slice(&vec![0x00; 318]);
+                assert_eq!(command_buffer.len(), 322);
+            }
+        }
 
         let port: u16 = 4440;
 
