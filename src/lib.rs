@@ -5,7 +5,7 @@ use log::{debug, error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::{Arc, Mutex};
@@ -25,13 +25,26 @@ const DEVICE_INFO_SRC_PORT2: u32 = 1030;
 
 const DEVICE_SETTINGS_PORT: u32 = 8700;
 
+#[derive(Debug)]
 pub enum DanteVersion {
     Dante4_4_1_3,
     Dante4_2_1_3,
 }
 
+impl Display for DanteVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "{}",
+            match self {
+                DanteVersion::Dante4_4_1_3 => "4.4.1.3",
+                DanteVersion::Dante4_2_1_3 => "4.2.1.3",
+            }
+        ))
+    }
+}
+
 impl DanteVersion {
-    fn get_commands(self) -> DanteVersionCommands {
+    fn get_commands(&self) -> DanteVersionCommands {
         match self {
             DanteVersion::Dante4_4_1_3 => DANTECOMMANDS_4_4_1_3,
             DanteVersion::Dante4_2_1_3 => DANTECOMMANDS_4_2_1_3,
@@ -808,7 +821,7 @@ impl DanteDeviceManager {
 
     pub fn make_subscription(
         &mut self,
-        version: DanteVersion,
+        version: &DanteVersion,
         rx_device_ip: &Ipv4Addr,
         rx_channel_id: u16,
         tx_device: &AsciiStr,
@@ -872,7 +885,7 @@ impl DanteDeviceManager {
 
     pub fn clear_subscription(
         &mut self,
-        version: DanteVersion,
+        version: &DanteVersion,
         rx_device_ip: &Ipv4Addr,
         rx_channel_id: u16,
     ) -> Result<(), MakeSubscriptionError> {
