@@ -452,6 +452,7 @@ pub enum ClearSubscriptionError {
     ConnectionFailed,
 }
 
+/// A Dante Device Manager stores information related to interacting with dante devices. Right now, it stores mdns information found from start_discovery() and a sequence ID. Currently, the control of dante devices is separate from the discovery of them. I found that for some devices on the network, mdns discovery can be slow or not happen at all, so I switched to using direct ip addresses and channel numbers/names (essentially exactly the information that is needed to send the udp packet to make the connection). In the case of make_subscription() and clear_subscription(), the only state changed by DanteDeviceManager is a sequence ID, which is an incrementing 16-bit integer, though whether this is really needed is suspect.
 pub struct DanteDeviceManager {
     device_list: Arc<Mutex<DanteDeviceList>>,
     running: Arc<Mutex<bool>>,
@@ -819,6 +820,7 @@ impl DanteDeviceManager {
         Ok(())
     }
 
+    /// Makes a dante subscription on a device. Dante subscriptions are "stored" on the receiver side, where a transmitter device name and transmitter device channel name are associated with a specific channel number on the receiver side. The arguments for this function are exactly the arguments needed to construct the udp packet. Also, there is no need to start_discovery() beforehand, the two functionalities are separate.
     pub fn make_subscription(
         &mut self,
         version: &DanteVersion,
@@ -883,6 +885,7 @@ impl DanteDeviceManager {
         }
     }
 
+    /// Clears a dante device subscription. Essentially the same as make_subscription except with an empty transmitter name and transmitter channel name.
     pub fn clear_subscription(
         &mut self,
         version: &DanteVersion,
@@ -926,14 +929,17 @@ impl DanteDeviceManager {
         }
     }
 
+    /// Returns whether dante mdns discovery is running
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap()
     }
 
+    /// Stops mdns discovery
     pub fn stop_discovery(&self) {
         *self.running.lock().unwrap() = false;
     }
 
+    /// Returns a list of all the mdns dante device names that were found on the network.
     pub fn get_device_names(&self) -> Vec<String> {
         self.device_list
             .lock()
@@ -944,6 +950,7 @@ impl DanteDeviceManager {
             .collect()
     }
 
+    /// Returns a list descriptions of all the mdns dante device names that were found on the network.
     pub fn get_device_descriptions(&self) -> Vec<String> {
         let device_list = self.device_list.lock().unwrap();
         let device_info_map = device_list.devices.iter().map(|(device, status)| {
