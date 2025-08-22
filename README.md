@@ -1,3 +1,6 @@
+# Status
+I no longer have access to dante hardware or a license so probably won't add support for new dante versions. However, If they haven't changed the protocol byte order, it may still work for new versions regardless, I just haven't tested it.
+
 # dante-control-rs
 
 Dante discovery and control as a rust library
